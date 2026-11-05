@@ -7,18 +7,16 @@ import io
 
 st.set_page_config(page_title="Tool Check Đa Năng", layout="wide")
 st.title("🛠️ CÔNG CỤ KIỂM TRA LINK ĐA NĂNG")
-st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ Excel hoặc Google Sheet.")
+st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ văn bản, Excel hoặc Google Sheet.")
 
 async def check_url(session, semaphore, item):
     idx, url = item
-    # Bổ sung User-Agent chuyên dụng để tránh bị máy chủ chặn
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     }
     async with semaphore:
         try:
-            # Dùng GET thay vì HEAD để tránh bị 403 ở một số máy chủ bảo mật
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), headers=headers, allow_redirects=True) as resp:
                 if resp.status >= 400:
                     return {'idx': idx, 'Link_lỗi': url, 'Mã_Lỗi': resp.status}
@@ -30,24 +28,21 @@ async def check_url(session, semaphore, item):
 
 async def process_data(df):
     tasks_list = []
-    # Regex đa dụng: Nhận diện mọi link http/https, bỏ qua dấu phẩy/ngoặc ở cuối
     url_pattern = re.compile(r'(https?://[^\s,\]}\)]+)')
     
     for idx, row in df.iterrows():
         for col_idx in range(len(row)):
             val = str(row.get(col_idx, ''))
             if 'http' in val:
-                # Tìm tất cả URL trong 1 ô dữ liệu
                 matches = url_pattern.findall(val)
                 if matches:
                     for match in matches:
                         tasks_list.append((idx, match.strip()))
-                break # Chỉ quét cột đầu tiên chứa URL để tránh trùng lặp
+                break 
 
     if not tasks_list:
         return []
 
-    # Giảm số luồng đồng thời xuống 50 để tránh bị máy chủ TGDĐ/ĐMX chặn IP
     semaphore = asyncio.Semaphore(50)
     connector = aiohttp.TCPConnector(limit=100, ssl=False)
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -55,14 +50,14 @@ async def process_data(df):
         results = await asyncio.gather(*tasks)
     return [r for r in results if r is not None]
 
-input_method = st.radio("1. Chọn nguồn dữ liệu:", ("Tải file Excel", "Dán link Google Sheet"))
+input_method = st.radio("1. Chọn nguồn dữ liệu:", ("Tải file Excel", "Dán link Google Sheet", "Nhập link trực tiếp"))
 
 df = None
 if input_method == "Tải file Excel":
     uploaded_file = st.file_uploader("Tải file .xlsx hoặc .xls lên đây", type=['xlsx', 'xls'])
     if uploaded_file is not None:
         df = pd.read_excel(uploaded_file, header=None)
-else:
+elif input_method == "Dán link Google Sheet":
     sheet_url = st.text_input("Dán link Google Sheet vào đây:")
     st.info("Lưu ý: File Google Sheet cần bật Share 'Bất kỳ ai có liên kết'.")
     if sheet_url:
@@ -74,6 +69,11 @@ else:
             df = pd.read_csv(csv_url, header=None)
         except Exception:
             st.error("Không đọc được dữ liệu. Kiểm tra lại link hoặc quyền truy cập!")
+else:
+    raw_text = st.text_area("Dán trực tiếp danh sách link vào đây (mỗi dòng 1 link hoặc copy nguyên đoạn văn bản chứa link lộn xộn):", height=200)
+    if raw_text.strip():
+        lines = [line for line in raw_text.split('\n') if line.strip()]
+        df = pd.DataFrame(lines, columns=['Dữ_Liệu_Nhập_Vào'])
 
 if df is not None:
     if st.button("2. BẤM VÀO ĐÂY ĐỂ QUÉT LINK", type="primary"):
