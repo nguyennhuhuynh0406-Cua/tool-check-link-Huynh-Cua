@@ -7,7 +7,7 @@ import io
 
 st.set_page_config(page_title="Tool Check Đa Năng", layout="wide")
 st.title("🛠️ CÔNG CỤ KIỂM TRA LINK ĐA NĂNG")
-st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ văn bản, Excel hoặc Google Sheet.")
+st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ văn bản, Excel hoặc Google Sheet (Quét toàn bộ các cột trong file).")
 
 async def check_url(session, semaphore, item):
     idx, url = item
@@ -31,6 +31,7 @@ async def process_data(df):
     url_pattern = re.compile(r'(https?://[^\s,\]}\)]+)')
     
     for idx, row in df.iterrows():
+        # Quét qua tất cả các ô trong 1 dòng, không dừng lại giữa chừng
         for col_idx in range(len(row)):
             val = str(row.get(col_idx, ''))
             if 'http' in val:
@@ -38,7 +39,6 @@ async def process_data(df):
                 if matches:
                     for match in matches:
                         tasks_list.append((idx, match.strip()))
-                break 
 
     if not tasks_list:
         return []
@@ -77,7 +77,7 @@ else:
 
 if df is not None:
     if st.button("2. BẤM VÀO ĐÂY ĐỂ QUÉT LINK", type="primary"):
-        with st.spinner("Đang quét, vui lòng giữ nguyên trang..."):
+        with st.spinner("Đang quét toàn bộ dữ liệu, vui lòng giữ nguyên trang..."):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             error_list = loop.run_until_complete(process_data(df))
@@ -101,7 +101,7 @@ if df is not None:
                 st.download_button(
                     label="3. ⬇️ TẢI FILE KẾT QUẢ VỀ MÁY",
                     data=output.getvalue(),
-                    file_name="link_loi_da_nang.xlsx",
+                    file_name="ket_qua_quet_toan_bo.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
