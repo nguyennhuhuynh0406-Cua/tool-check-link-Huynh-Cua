@@ -5,34 +5,51 @@ import aiohttp
 import re
 import io
 
-st.set_page_config(page_title="Tool Check Link Ảnh", layout="wide")
-st.title("🛠️ CÔNG CỤ KIỂM TRA LINK ẢNH HỎNG")
-st.markdown("Hỗ trợ quét từ file Excel hoặc link Google Sheet. Kết quả trả về giữ nguyên cấu trúc gốc.")
+st.set_page_config(page_title="Tool Check Đa Năng", layout="wide")
+st.title("🛠️ CÔNG CỤ KIỂM TRA LINK ĐA NĂNG")
+st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ Excel hoặc Google Sheet.")
 
 async def check_url(session, semaphore, item):
     idx, url = item
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    # Bổ sung User-Agent chuyên dụng để tránh bị máy chủ chặn
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    }
     async with semaphore:
         try:
-            async with session.head(url, timeout=aiohttp.ClientTimeout(total=8), headers=headers, allow_redirects=True) as resp:
-                if resp.status != 200:
+            # Dùng GET thay vì HEAD để tránh bị 403 ở một số máy chủ bảo mật
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), headers=headers, allow_redirects=True) as resp:
+                if resp.status >= 400:
                     return {'idx': idx, 'Link_lỗi': url, 'Mã_Lỗi': resp.status}
-        except Exception:
+        except asyncio.TimeoutError:
+            return {'idx': idx, 'Link_lỗi': url, 'Mã_Lỗi': 'Timeout (Hết thời gian chờ)'}
+        except Exception as e:
             return {'idx': idx, 'Link_lỗi': url, 'Mã_Lỗi': 'Lỗi kết nối / Link hỏng'}
     return None
 
 async def process_data(df):
     tasks_list = []
+    # Regex đa dụng: Nhận diện mọi link http/https, bỏ qua dấu phẩy/ngoặc ở cuối
+    url_pattern = re.compile(r'(https?://[^\s,\]}\)]+)')
+    
     for idx, row in df.iterrows():
         for col_idx in range(len(row)):
             val = str(row.get(col_idx, ''))
-            match = re.search(r'url=(https?://[^,}]+)', val)
-            if match:
-                tasks_list.append((idx, match.group(1).strip()))
-                break
+            if 'http' in val:
+                # Tìm tất cả URL trong 1 ô dữ liệu
+                matches = url_pattern.findall(val)
+                if matches:
+                    for match in matches:
+                        tasks_list.append((idx, match.strip()))
+                break # Chỉ quét cột đầu tiên chứa URL để tránh trùng lặp
 
-    semaphore = asyncio.Semaphore(100)
-    connector = aiohttp.TCPConnector(limit=150, ssl=False)
+    if not tasks_list:
+        return []
+
+    # Giảm số luồng đồng thời xuống 50 để tránh bị máy chủ TGDĐ/ĐMX chặn IP
+    semaphore = asyncio.Semaphore(50)
+    connector = aiohttp.TCPConnector(limit=100, ssl=False)
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = [check_url(session, semaphore, item) for item in tasks_list]
         results = await asyncio.gather(*tasks)
@@ -47,7 +64,7 @@ if input_method == "Tải file Excel":
         df = pd.read_excel(uploaded_file, header=None)
 else:
     sheet_url = st.text_input("Dán link Google Sheet vào đây:")
-    st.info("Lưu ý: File Google Sheet cần được cài đặt quyền chia sẻ là 'Bất kỳ ai có liên kết' (Anyone with the link).")
+    st.info("Lưu ý: File Google Sheet cần bật Share 'Bất kỳ ai có liên kết'.")
     if sheet_url:
         try:
             if "/edit" in sheet_url or "/view" in sheet_url:
@@ -56,11 +73,11 @@ else:
                 csv_url = sheet_url
             df = pd.read_csv(csv_url, header=None)
         except Exception:
-            st.error("Không thể đọc được dữ liệu. Hãy kiểm tra lại link hoặc quyền chia sẻ của Google Sheet!")
+            st.error("Không đọc được dữ liệu. Kiểm tra lại link hoặc quyền truy cập!")
 
 if df is not None:
     if st.button("2. BẤM VÀO ĐÂY ĐỂ QUÉT LINK", type="primary"):
-        with st.spinner("Đang quét tốc độ cao, vui lòng đợi..."):
+        with st.spinner("Đang quét, vui lòng giữ nguyên trang..."):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             error_list = loop.run_until_complete(process_data(df))
@@ -70,11 +87,11 @@ if df is not None:
                 error_indices = df_errors['idx'].tolist()
                 
                 df_result = df.loc[error_indices].copy()
-                df_result.insert(0, 'Dòng_Dữ_Liệu_Gốc', [i + 1 for i in error_indices])
+                df_result.insert(0, 'Dòng_Gốc', [i + 1 for i in error_indices])
                 df_result['Link_bị_lỗi'] = df_errors['Link_lỗi'].values
                 df_result['Mã_Lỗi'] = df_errors['Mã_Lỗi'].values
                 
-                st.error(f"⚠️ Phát hiện {len(error_list)} link lỗi!")
+                st.error(f"⚠️ Phát hiện {len(error_list)} link lỗi (404, 403...)!")
                 st.dataframe(df_result)
                 
                 output = io.BytesIO()
@@ -84,8 +101,8 @@ if df is not None:
                 st.download_button(
                     label="3. ⬇️ TẢI FILE KẾT QUẢ VỀ MÁY",
                     data=output.getvalue(),
-                    file_name="ket_qua_link_loi.xlsx",
+                    file_name="link_loi_da_nang.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.success("🎉 Tuyệt vời, không có link ảnh nào bị hỏng!")
+                st.success("🎉 Tất cả link đều hoạt động bình thường!")
