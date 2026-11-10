@@ -7,9 +7,8 @@ import io
 
 st.set_page_config(page_title="Tool Check Đa Năng", layout="wide")
 st.title("🛠️ CÔNG CỤ KIỂM TRA LINK ĐA NĂNG")
-st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ văn bản, Excel hoặc Google Sheet (Báo lỗi chi tiết theo từng cột gốc).")
+st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ văn bản, Excel hoặc Google Sheet (Tốc độ an toàn).")
 
-# Hàm chuyển đổi số thứ tự cột thành chữ cái Excel (0 -> A, 1 -> B,...)
 def get_excel_col_name(n):
     result = ""
     n += 1
@@ -26,6 +25,7 @@ async def check_url(session, semaphore, item):
     }
     async with semaphore:
         try:
+            # Thời gian chờ an toàn: 8 giây
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8), headers=headers, allow_redirects=True) as resp:
                 if resp.status >= 400:
                     return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': url, 'Mã_Lỗi': str(resp.status)}
@@ -47,7 +47,7 @@ async def process_data(df, progress_bar, status_text):
                 matches = url_pattern.findall(val)
                 if matches:
                     col_letter = get_excel_col_name(col_idx)
-                    for match in set(matches): # Dùng set để loại bỏ trùng lặp nếu 1 ô có link giống nhau
+                    for match in set(matches):
                         tasks_list.append((idx, col_letter, match.strip()))
 
     total_links = len(tasks_list)
@@ -57,10 +57,11 @@ async def process_data(df, progress_bar, status_text):
 
     status_text.text(f"✅ Đã phân loại xong {total_links} link. Bắt đầu quét...")
     
-    semaphore = asyncio.Semaphore(50)
-    connector = aiohttp.TCPConnector(limit=100, ssl=False)
+    # TỐC ĐỘ CÂN BẰNG - AN TOÀN
+    semaphore = asyncio.Semaphore(100) # Quét 100 link cùng lúc
+    connector = aiohttp.TCPConnector(limit=150, ssl=False)
     results = []
-    chunk_size = 1000 
+    chunk_size = 2000 # Nghỉ nhịp sau mỗi 2000 link
     
     async with aiohttp.ClientSession(connector=connector) as session:
         for i in range(0, total_links, chunk_size):
@@ -73,7 +74,7 @@ async def process_data(df, progress_bar, status_text):
             current_processed = min(i + chunk_size, total_links)
             progress = current_processed / total_links
             progress_bar.progress(progress)
-            status_text.text(f"⏳ Đang quét: {current_processed} / {total_links} link...")
+            status_text.text(f"⏳ Đang quét an toàn: {current_processed} / {total_links} link...")
             
     status_text.text(f"🎉 Đã quét xong toàn bộ {total_links} link!")
     return results
@@ -116,33 +117,29 @@ if df is not None:
         error_list = loop.run_until_complete(process_data(df, progress_bar, status_text))
         
         if len(error_list) > 0:
-            # Lọc ra các dòng có lỗi
             error_indices = sorted(list(set([e['idx'] for e in error_list])))
             df_result = df.loc[error_indices].copy()
             df_result.insert(0, 'Dòng_Gốc', [i + 1 for i in df_result.index])
             
-            # Tự động tạo các cột báo lỗi tương ứng với cột gốc bị hỏng
             error_cols_found = sorted(list(set([e['col_letter'] for e in error_list])))
             
             for col in error_cols_found:
                 df_result[f'Link_Lỗi_(Cột_{col})'] = ""
                 df_result[f'Mã_Lỗi_(Cột_{col})'] = ""
             
-            # Phân bổ lỗi vào đúng cột
             for e in error_list:
                 r_idx = e['idx']
                 c_name = e['col_letter']
                 
                 current_link = df_result.at[r_idx, f'Link_Lỗi_(Cột_{c_name})']
                 if current_link:
-                    # Nếu 1 ô có nhiều link hỏng, xuống dòng để liệt kê
                     df_result.at[r_idx, f'Link_Lỗi_(Cột_{c_name})'] = f"{current_link}\n{e['Link_lỗi']}"
                     df_result.at[r_idx, f'Mã_Lỗi_(Cột_{c_name})'] = f"{df_result.at[r_idx, f'Mã_Lỗi_(Cột_{c_name})']}\n{e['Mã_Lỗi']}"
                 else:
                     df_result.at[r_idx, f'Link_Lỗi_(Cột_{c_name})'] = e['Link_lỗi']
                     df_result.at[r_idx, f'Mã_Lỗi_(Cột_{c_name})'] = e['Mã_Lỗi']
             
-            st.error(f"⚠️ Phát hiện {len(error_list)} link lỗi (404, 403...)!")
+            st.error(f"⚠️ Phát hiện {len(error_list)} link lỗi!")
             st.dataframe(df_result)
             
             output = io.BytesIO()
