@@ -8,7 +8,7 @@ import gc
 
 st.set_page_config(page_title="Tool Check Đa Năng", layout="wide")
 st.title("🛠️ CÔNG CỤ KIỂM TRA LINK ĐA NĂNG của Huỳnh Cua")
-st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ văn bản, Excel hoặc Google Sheet. **(Phiên bản: Quét 1 lần Auto toàn file)**")
+st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ văn bản, Excel hoặc Google Sheet. **(Phiên bản: Bóc tách link dính chùm & Auto toàn file)**")
 
 def get_excel_col_name(n):
     result = ""
@@ -20,68 +20,78 @@ def get_excel_col_name(n):
 
 async def check_url(session, semaphore, item):
     idx, col_letter, url = item
+    
+    # Bổ sung Headers chuyên biệt để vượt CDN của TGDĐ/ĐMX
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
         'Accept-Encoding': 'gzip, deflate, br',
-        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
+        'Accept-Language': 'vi-VN,vi;q=0.9',
+        'Referer': 'https://www.dienmayxanh.com/',
+        'Sec-Fetch-Dest': 'image',
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Site': 'cross-site',
+        'Connection': 'keep-alive'
     }
     
-    clean_url = url.strip(".'\"\\,;>")
     max_retries = 3
     
     async with semaphore:
-        await asyncio.sleep(0.1) # Giãn nhịp để không bị CDN chặn 
+        await asyncio.sleep(0.1) 
         for attempt in range(max_retries):
             try:
-                async with session.get(clean_url, timeout=aiohttp.ClientTimeout(total=15), headers=headers, allow_redirects=True) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), headers=headers, allow_redirects=True) as resp:
                     if resp.status >= 400:
                         if resp.status in [403, 429, 500, 502, 503, 504] and attempt < max_retries - 1:
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(1.5)
                             continue
-                        return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': clean_url, 'Mã_Lỗi': str(resp.status)}
+                        return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': url, 'Mã_Lỗi': str(resp.status)}
                     else:
                         return None
             except asyncio.TimeoutError:
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.5)
                     continue
-                return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': clean_url, 'Mã_Lỗi': 'Timeout (Chờ 15s)'}
+                return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': url, 'Mã_Lỗi': 'Timeout (Chờ 15s)'}
             except Exception:
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.5)
                     continue
-                return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': clean_url, 'Mã_Lỗi': 'Lỗi kết nối / Link hỏng'}
+                return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': url, 'Mã_Lỗi': 'Lỗi kết nối / Link hỏng'}
     return None
 
 async def process_data(df, progress_bar, status_text):
     tasks_list = []
-    url_pattern = re.compile(r'(https?://[^\s\]}\)]+)')
     
-    status_text.text("🔄 Đang trích xuất toàn bộ link từ file, quá trình này mất khoảng vài giây...")
+    # Regex CỰC MẠNH: Bắt đầu bằng http/https, và lấy mọi ký tự cho đến khi đụng dấu phẩy, khoảng trắng, hoặc ngoặc
+    url_pattern = re.compile(r'https?://[^\s,"\'<>\]}]+')
+    
+    status_text.text("🔄 Đang bóc tách từng link dính chùm trong ô, vui lòng đợi...")
     for idx, row in df.iterrows():
         for col_idx, col_name in enumerate(df.columns):
             val = str(row.get(col_name, ''))
             if 'http' in val:
+                # Tự động dò và tách rời các link dù chúng dính liền bằng dấu phẩy
                 matches = url_pattern.findall(val)
                 if matches:
                     col_letter = get_excel_col_name(col_idx)
                     for match in set(matches):
-                        tasks_list.append((idx, col_letter, match.strip()))
+                        # Quét dọn lần cuối để chắc chắn không còn dấu rác nào
+                        clean_link = match.strip(".'\"\\,;>)]}")
+                        if clean_link:
+                            tasks_list.append((idx, col_letter, clean_link))
 
     total_links = len(tasks_list)
     if total_links == 0:
         status_text.text("⚠️ Không tìm thấy đường link nào trong dữ liệu!")
         return []
 
-    status_text.text(f"✅ Đã gom đủ {total_links} link. Bắt đầu tiến trình quét tự động...")
+    status_text.text(f"✅ Đã bóc tách thành công {total_links} link riêng biệt. Bắt đầu quét...")
     
-    semaphore = asyncio.Semaphore(150) # Tốc độ quét 150 link cùng lúc
+    semaphore = asyncio.Semaphore(150) 
     connector = aiohttp.TCPConnector(limit=200, ssl=False)
     results = []
-    chunk_size = 1500 # Hệ thống ngầm xử lý từng cụm 1500 link để chống sập RAM
+    chunk_size = 1500 
     
     async with aiohttp.ClientSession(connector=connector) as session:
         for i in range(0, total_links, chunk_size):
@@ -91,13 +101,11 @@ async def process_data(df, progress_bar, status_text):
             chunk_results = await asyncio.gather(*tasks)
             results.extend([r for r in chunk_results if r is not None])
             
-            # Cập nhật thanh %
             current_processed = min(i + chunk_size, total_links)
             progress = current_processed / total_links
             progress_bar.progress(progress)
             status_text.text(f"⏳ Hệ thống đang quét tự động: {current_processed} / {total_links} link. (VUI LÒNG KHÔNG TẮT TAB NÀY)")
             
-            # Giải phóng bộ nhớ (RAM) ép buộc sau mỗi cụm để Streamlit không bị văng
             del tasks
             del chunk_results
             gc.collect() 
