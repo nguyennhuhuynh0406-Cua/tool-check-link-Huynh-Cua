@@ -4,10 +4,11 @@ import asyncio
 import aiohttp
 import re
 import io
+import gc
 
 st.set_page_config(page_title="Tool Check Đa Năng", layout="wide")
 st.title("🛠️ CÔNG CỤ KIỂM TRA LINK ĐA NĂNG của Huỳnh Cua")
-st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ văn bản, Excel hoặc Google Sheet (Tích hợp chống tràn RAM & Auto-Retry).")
+st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ văn bản, Excel hoặc Google Sheet. **(Phiên bản: Quét 1 lần Auto toàn file)**")
 
 def get_excel_col_name(n):
     result = ""
@@ -21,44 +22,45 @@ async def check_url(session, semaphore, item):
     idx, col_letter, url = item
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
     }
     
+    clean_url = url.strip(".'\"\\,;>")
     max_retries = 3
     
     async with semaphore:
-        await asyncio.sleep(0.1) 
-        
+        await asyncio.sleep(0.1) # Giãn nhịp để không bị CDN chặn 
         for attempt in range(max_retries):
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), headers=headers, allow_redirects=True) as resp:
+                async with session.get(clean_url, timeout=aiohttp.ClientTimeout(total=15), headers=headers, allow_redirects=True) as resp:
                     if resp.status >= 400:
                         if resp.status in [403, 429, 500, 502, 503, 504] and attempt < max_retries - 1:
                             await asyncio.sleep(1)
                             continue
-                        return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': url, 'Mã_Lỗi': str(resp.status)}
+                        return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': clean_url, 'Mã_Lỗi': str(resp.status)}
                     else:
                         return None
-                        
             except asyncio.TimeoutError:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(1)
                     continue
-                return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': url, 'Mã_Lỗi': 'Timeout (Chờ 15s không phản hồi)'}
-                
+                return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': clean_url, 'Mã_Lỗi': 'Timeout (Chờ 15s)'}
             except Exception:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(1)
                     continue
-                return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': url, 'Mã_Lỗi': 'Lỗi kết nối / Link hỏng'}
-                
+                return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': clean_url, 'Mã_Lỗi': 'Lỗi kết nối / Link hỏng'}
     return None
 
 async def process_data(df, progress_bar, status_text):
     tasks_list = []
-    url_pattern = re.compile(r'(https?://[^\s,\]}\)]+)')
+    url_pattern = re.compile(r'(https?://[^\s\]}\)]+)')
     
-    status_text.text("🔄 Đang trích xuất link và phân loại cột, vui lòng đợi...")
+    status_text.text("🔄 Đang trích xuất toàn bộ link từ file, quá trình này mất khoảng vài giây...")
     for idx, row in df.iterrows():
         for col_idx, col_name in enumerate(df.columns):
             val = str(row.get(col_name, ''))
@@ -71,15 +73,15 @@ async def process_data(df, progress_bar, status_text):
 
     total_links = len(tasks_list)
     if total_links == 0:
-        status_text.text("⚠️ Không tìm thấy đường link nào trong đoạn dữ liệu này!")
+        status_text.text("⚠️ Không tìm thấy đường link nào trong dữ liệu!")
         return []
 
-    status_text.text(f"✅ Đã phân loại xong {total_links} link. Bắt đầu quét...")
+    status_text.text(f"✅ Đã gom đủ {total_links} link. Bắt đầu tiến trình quét tự động...")
     
-    semaphore = asyncio.Semaphore(100) 
-    connector = aiohttp.TCPConnector(limit=150, ssl=False)
+    semaphore = asyncio.Semaphore(150) # Tốc độ quét 150 link cùng lúc
+    connector = aiohttp.TCPConnector(limit=200, ssl=False)
     results = []
-    chunk_size = 2000
+    chunk_size = 1500 # Hệ thống ngầm xử lý từng cụm 1500 link để chống sập RAM
     
     async with aiohttp.ClientSession(connector=connector) as session:
         for i in range(0, total_links, chunk_size):
@@ -89,12 +91,18 @@ async def process_data(df, progress_bar, status_text):
             chunk_results = await asyncio.gather(*tasks)
             results.extend([r for r in chunk_results if r is not None])
             
+            # Cập nhật thanh %
             current_processed = min(i + chunk_size, total_links)
             progress = current_processed / total_links
             progress_bar.progress(progress)
-            status_text.text(f"⏳ Đang quét an toàn: {current_processed} / {total_links} link...")
+            status_text.text(f"⏳ Hệ thống đang quét tự động: {current_processed} / {total_links} link. (VUI LÒNG KHÔNG TẮT TAB NÀY)")
             
-    status_text.text(f"🎉 Đã quét xong đoạn dữ liệu này!")
+            # Giải phóng bộ nhớ (RAM) ép buộc sau mỗi cụm để Streamlit không bị văng
+            del tasks
+            del chunk_results
+            gc.collect() 
+            
+    status_text.text(f"🎉 Đã quét thành công toàn bộ {total_links} link!")
     return results
 
 input_method = st.radio("1. Chọn nguồn dữ liệu:", ("Tải file Excel", "Dán link Google Sheet", "Nhập link trực tiếp"))
@@ -126,67 +134,54 @@ else:
         df = pd.DataFrame(lines, columns=['Dữ_Liệu_Nhập_Vào'])
 
 if df is not None:
-    st.success(f"✅ Tải dữ liệu thành công! Tổng cộng file có {len(df)} dòng.")
+    st.success(f"✅ Tải dữ liệu thành công! Tổng cộng file có {len(df)} dòng dữ liệu.")
     
-    st.markdown("### 2. CHIA NHỎ ĐỂ QUÉT (Chống lỗi văng web)")
-    st.info("Với file nặng, hãy quét mỗi lần 3.000 - 5.000 dòng để máy chủ không bị quá tải.")
+    st.warning("⚠️ LƯU Ý: Với file cực lớn (trên 10.000 dòng), quá trình quét sẽ mất khoảng 5 - 15 phút. Bạn hãy bấm quét 1 lần và **MỞ TREO TAB NÀY**, đừng tải lại trang nhé!")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        start_row = st.number_input("Quét từ dòng số:", min_value=1, max_value=len(df), value=1)
-    with col2:
-        default_end = min(5000, len(df))
-        end_row = st.number_input("Đến dòng số:", min_value=1, max_value=len(df), value=default_end)
+    if st.button("2. 🚀 BẤM VÀO ĐÂY ĐỂ QUÉT TOÀN BỘ FILE (1 LẦN DUY NHẤT)", type="primary", use_container_width=True):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
-    if st.button("3. BẤM VÀO ĐÂY ĐỂ QUÉT LINK", type="primary"):
-        if start_row > end_row:
-            st.error("Dòng bắt đầu không được lớn hơn dòng kết thúc!")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        error_list = loop.run_until_complete(process_data(df, progress_bar, status_text))
+        
+        if len(error_list) > 0:
+            error_indices = sorted(list(set([e['idx'] for e in error_list])))
+            df_result = df.loc[error_indices].copy()
+            df_result.insert(0, 'Dòng_Gốc', [i + 1 for i in df_result.index])
+            
+            error_cols_found = sorted(list(set([e['col_letter'] for e in error_list])))
+            
+            for col in error_cols_found:
+                df_result[f'Link_Lỗi_(Cột_{col})'] = ""
+                df_result[f'Mã_Lỗi_(Cột_{col})'] = ""
+            
+            for e in error_list:
+                r_idx = e['idx']
+                c_name = e['col_letter']
+                
+                current_link = df_result.at[r_idx, f'Link_Lỗi_(Cột_{c_name})']
+                if current_link:
+                    df_result.at[r_idx, f'Link_Lỗi_(Cột_{c_name})'] = f"{current_link}\n{e['Link_lỗi']}"
+                    df_result.at[r_idx, f'Mã_Lỗi_(Cột_{c_name})'] = f"{df_result.at[r_idx, f'Mã_Lỗi_(Cột_{c_name})']}\n{e['Mã_Lỗi']}"
+                else:
+                    df_result.at[r_idx, f'Link_Lỗi_(Cột_{c_name})'] = e['Link_lỗi']
+                    df_result.at[r_idx, f'Mã_Lỗi_(Cột_{c_name})'] = e['Mã_Lỗi']
+            
+            st.error(f"⚠️ Đã quét xong! Phát hiện tổng cộng {len(error_list)} link lỗi trong toàn bộ file.")
+            st.dataframe(df_result)
+            
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_result.to_excel(writer, index=False)
+            
+            st.download_button(
+                label="3. ⬇️ TẢI FILE KẾT QUẢ GỘP VỀ MÁY",
+                data=output.getvalue(),
+                file_name="ket_qua_quet_FULL_toan_bo.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
         else:
-            df_subset = df.iloc[start_row-1:end_row].copy()
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            error_list = loop.run_until_complete(process_data(df_subset, progress_bar, status_text))
-            
-            if len(error_list) > 0:
-                error_indices = sorted(list(set([e['idx'] for e in error_list])))
-                df_result = df_subset.loc[error_indices].copy()
-                
-                df_result.insert(0, 'Dòng_Gốc', [i + 1 for i in df_result.index])
-                
-                error_cols_found = sorted(list(set([e['col_letter'] for e in error_list])))
-                
-                for col in error_cols_found:
-                    df_result[f'Link_Lỗi_(Cột_{col})'] = ""
-                    df_result[f'Mã_Lỗi_(Cột_{col})'] = ""
-                
-                for e in error_list:
-                    r_idx = e['idx']
-                    c_name = e['col_letter']
-                    
-                    current_link = df_result.at[r_idx, f'Link_Lỗi_(Cột_{c_name})']
-                    if current_link:
-                        df_result.at[r_idx, f'Link_Lỗi_(Cột_{c_name})'] = f"{current_link}\n{e['Link_lỗi']}"
-                        df_result.at[r_idx, f'Mã_Lỗi_(Cột_{c_name})'] = f"{df_result.at[r_idx, f'Mã_Lỗi_(Cột_{c_name})']}\n{e['Mã_Lỗi']}"
-                    else:
-                        df_result.at[r_idx, f'Link_Lỗi_(Cột_{c_name})'] = e['Link_lỗi']
-                        df_result.at[r_idx, f'Mã_Lỗi_(Cột_{c_name})'] = e['Mã_Lỗi']
-                
-                st.error(f"⚠️ Phát hiện {len(error_list)} link lỗi trong đoạn từ dòng {start_row} đến {end_row}!")
-                st.dataframe(df_result)
-                
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_result.to_excel(writer, index=False)
-                
-                st.download_button(
-                    label="4. ⬇️ TẢI FILE KẾT QUẢ VỀ MÁY",
-                    data=output.getvalue(),
-                    file_name=f"ket_qua_loi_tu_dong_{start_row}_den_{end_row}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.success(f"🎉 Tất cả link từ dòng {start_row} đến {end_row} đều bình thường!")
+            st.success("🎉 Thật tuyệt vời! Toàn bộ link trong file của bạn đều sống 100%!")
