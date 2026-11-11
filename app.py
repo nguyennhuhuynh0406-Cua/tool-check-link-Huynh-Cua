@@ -8,7 +8,7 @@ import gc
 
 st.set_page_config(page_title="Tool Check Đa Năng", layout="wide")
 st.title("🛠️ CÔNG CỤ KIỂM TRA LINK ĐA NĂNG của Huỳnh Cua")
-st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ Excel hoặc Google Sheet. **(Bản Tối Ưu Chống Văng Web - Quét Lưu Trạng Thái)**")
+st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ Excel hoặc Google Sheet. **(Bản Tự Sửa Lỗi Link & Quét Cuốn Chiếu)**")
 
 def get_excel_col_name(n):
     result = ""
@@ -44,7 +44,6 @@ async def check_url(session, semaphore, item):
                 return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': url, 'Mã_Lỗi': 'Lỗi kết nối / Timeout'}
     return None
 
-# ================= CƠ CHẾ LƯU TRỮ TRẠNG THÁI (TRÁNH MẤT DỮ LIỆU KHI VĂNG) =================
 if 'is_scanning' not in st.session_state:
     st.session_state.is_scanning = False
 if 'current_row' not in st.session_state:
@@ -56,7 +55,6 @@ if 'total_links_scanned' not in st.session_state:
 if 'df' not in st.session_state:
     st.session_state.df = None
 
-# NẾU CHƯA QUÉT THÌ HIỂN THỊ KHUNG NHẬP DỮ LIỆU
 if not st.session_state.is_scanning and st.session_state.df is None:
     input_method = st.radio("1. Chọn nguồn dữ liệu:", ("Tải file Excel", "Dán link Google Sheet", "Nhập link trực tiếp"))
     df_temp = None
@@ -89,10 +87,8 @@ if not st.session_state.is_scanning and st.session_state.df is None:
         st.session_state.df = df_temp
         st.rerun() 
 
-# NẾU ĐÃ CÓ DATA NHƯNG CHƯA BẤM QUÉT
 if not st.session_state.is_scanning and st.session_state.df is not None and st.session_state.current_row == 0:
     st.success(f"✅ Tải dữ liệu thành công! Tổng cộng file có {len(st.session_state.df)} dòng dữ liệu.")
-    st.info("⚠️ HỆ THỐNG MỚI: Tool sẽ tự động lưu nháp liên tục. Dù chạy lâu cũng không sợ văng mất kết quả!")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -107,22 +103,20 @@ if not st.session_state.is_scanning and st.session_state.df is not None and st.s
             st.session_state.df = None
             st.rerun()
 
-# ================= TIẾN TRÌNH QUÉT CHỐNG TREO WEB =================
 if st.session_state.is_scanning:
     df = st.session_state.df
     total_rows = len(df)
-    batch_size = 500 # Mỗi vòng lặp giải quyết 500 dòng
+    batch_size = 500 
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     current = st.session_state.current_row
     
-    # Cập nhật UI ngay lập tức
     current_processed_show = min(current, total_rows)
     progress_show = current_processed_show / total_rows if total_rows > 0 else 1.0
     progress_bar.progress(progress_show)
-    status_text.text(f"⏳ Đang quét cuốn chiếu: Xong {current_processed_show}/{total_rows} dòng (đã check {st.session_state.total_links_scanned} link)...")
+    status_text.text(f"⏳ Đang quét cuốn chiếu và tự động sửa link: Xong {current_processed_show}/{total_rows} dòng (đã check {st.session_state.total_links_scanned} link)...")
 
     if current < total_rows:
         df_batch = df.iloc[current : current + batch_size]
@@ -132,11 +126,23 @@ if st.session_state.is_scanning:
         for idx, row in df_batch.iterrows():
             for col_idx, col_name in enumerate(df_batch.columns):
                 val = str(row.get(col_name, ''))
-                if 'http' in val:
-                    matches = url_pattern.findall(val)
-                    if matches:
-                        col_letter = get_excel_col_name(col_idx)
-                        for match in set(matches):
+                if 'http' in val or 'cdn' in val:
+                    # Tách chuỗi bằng dấu phẩy
+                    parts = val.split(',')
+                    col_letter = get_excel_col_name(col_idx)
+                    
+                    for part in parts:
+                        part = part.strip()
+                        # 1. AUTO-FIX: Bù dấu / bị thiếu (https:/cdnv2 -> https://cdnv2)
+                        if part.startswith('https:/') and not part.startswith('https://'):
+                            part = part.replace('https:/', 'https://', 1)
+                            
+                        # 2. AUTO-FIX: Chuyển khoảng trắng thành %20 để hệ thống đọc được file
+                        if ' ' in part:
+                            part = part.replace(' ', '%20')
+                            
+                        matches = url_pattern.findall(part)
+                        for match in matches:
                             clean_link = match.strip(".'\"\\,;>)]}")
                             if clean_link:
                                 tasks_list.append((idx, col_letter, clean_link))
@@ -154,21 +160,18 @@ if st.session_state.is_scanning:
             chunk_results = loop.run_until_complete(scan_batch())
             loop.close()
             
-            # Lọc lỗi và lưu vào State
             valid_errors = [r for r in chunk_results if r is not None]
             st.session_state.error_results.extend(valid_errors)
             st.session_state.total_links_scanned += len(tasks_list)
         
         st.session_state.current_row += batch_size
-        
         gc.collect()
-        st.rerun() # TỰ ĐỘNG CHỚP MÀN HÌNH ĐỂ GIỮ KẾT NỐI
+        st.rerun() 
         
     else:
         st.session_state.is_scanning = False 
         st.rerun()
 
-# ================= HIỂN THỊ KẾT QUẢ KHI XONG =================
 if not st.session_state.is_scanning and st.session_state.current_row >= len(st.session_state.df) if st.session_state.df is not None else False:
     df = st.session_state.df
     error_list = st.session_state.error_results
