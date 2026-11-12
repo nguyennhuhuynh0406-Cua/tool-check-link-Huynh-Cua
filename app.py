@@ -5,10 +5,12 @@ import aiohttp
 import re
 import io
 import gc
+import json
+import os
 
 st.set_page_config(page_title="Tool Check Đa Năng", layout="wide")
 st.title("🛠️ CÔNG CỤ KIỂM TRA LINK ĐA NĂNG của Huỳnh Cua")
-st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm từ Excel hoặc Google Sheet. **(Bản Tự Sửa Lỗi Link & Quét Cuốn Chiếu)**")
+st.markdown("Hỗ trợ quét URL trực tiếp, link ảnh, link sản phẩm. **(Bản Lưu Ổ Cứng - Phục Hồi Dữ Liệu & Chống Văng Web)**")
 
 def get_excel_col_name(n):
     result = ""
@@ -44,12 +46,35 @@ async def check_url(session, semaphore, item):
                 return {'idx': idx, 'col_letter': col_letter, 'Link_lỗi': url, 'Mã_Lỗi': 'Lỗi kết nối / Timeout'}
     return None
 
+# ================= CƠ CHẾ LƯU Ổ CỨNG =================
+BACKUP_FILE = "ket_qua_loi.json"
+STATE_FILE = "dong_hien_tai.txt"
+
+def load_progress():
+    if os.path.exists(BACKUP_FILE) and os.path.exists(STATE_FILE):
+        with open(STATE_FILE, 'r') as f:
+            row = int(f.read().strip())
+        with open(BACKUP_FILE, 'r', encoding='utf-8') as f:
+            errors = json.load(f)
+        return row, errors
+    return 0, []
+
+def save_progress(row, errors):
+    with open(STATE_FILE, 'w') as f:
+        f.write(str(row))
+    with open(BACKUP_FILE, 'w', encoding='utf-8') as f:
+        json.dump(errors, f, ensure_ascii=False)
+
+def clear_progress():
+    if os.path.exists(BACKUP_FILE): os.remove(BACKUP_FILE)
+    if os.path.exists(STATE_FILE): os.remove(STATE_FILE)
+
 if 'is_scanning' not in st.session_state:
     st.session_state.is_scanning = False
 if 'current_row' not in st.session_state:
-    st.session_state.current_row = 0
-if 'error_results' not in st.session_state:
-    st.session_state.error_results = []
+    saved_row, saved_errors = load_progress()
+    st.session_state.current_row = saved_row
+    st.session_state.error_results = saved_errors
 if 'total_links_scanned' not in st.session_state:
     st.session_state.total_links_scanned = 0
 if 'df' not in st.session_state:
@@ -87,26 +112,43 @@ if not st.session_state.is_scanning and st.session_state.df is None:
         st.session_state.df = df_temp
         st.rerun() 
 
-if not st.session_state.is_scanning and st.session_state.df is not None and st.session_state.current_row == 0:
+if not st.session_state.is_scanning and st.session_state.df is not None:
     st.success(f"✅ Tải dữ liệu thành công! Tổng cộng file có {len(st.session_state.df)} dòng dữ liệu.")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("2. 🚀 BẤM VÀO ĐÂY ĐỂ QUÉT TOÀN BỘ FILE", type="primary", use_container_width=True):
-            st.session_state.is_scanning = True
-            st.session_state.current_row = 0
-            st.session_state.error_results = []
-            st.session_state.total_links_scanned = 0
-            st.rerun()
-    with col2:
-        if st.button("🔄 Tải file khác", use_container_width=True):
-            st.session_state.df = None
-            st.rerun()
+    if st.session_state.current_row > 0 and st.session_state.current_row < len(st.session_state.df):
+        st.warning(f"⚠️ Phát hiện tiến trình đang quét dở ở dòng {st.session_state.current_row}. Đã khôi phục dữ liệu lỗi trước đó!")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("▶️ BẤM ĐỂ QUÉT TIẾP TỤC", type="primary", use_container_width=True):
+                st.session_state.is_scanning = True
+                st.rerun()
+        with col_b:
+            if st.button("🗑️ XÓA, QUÉT LẠI TỪ ĐẦU", use_container_width=True):
+                clear_progress()
+                st.session_state.current_row = 0
+                st.session_state.error_results = []
+                st.rerun()
+    elif st.session_state.current_row == 0:
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("2. 🚀 BẤM VÀO ĐÂY ĐỂ QUÉT TOÀN BỘ FILE", type="primary", use_container_width=True):
+                clear_progress()
+                st.session_state.is_scanning = True
+                st.session_state.current_row = 0
+                st.session_state.error_results = []
+                st.session_state.total_links_scanned = 0
+                st.rerun()
+        with col2:
+            if st.button("🔄 Tải file khác", use_container_width=True):
+                st.session_state.df = None
+                st.rerun()
 
 if st.session_state.is_scanning:
     df = st.session_state.df
     total_rows = len(df)
-    batch_size = 500 
+    
+    # Ép nhịp tim: Chạy 50 dòng một lần để trình duyệt không bị CONNECTING
+    batch_size = 50 
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -116,7 +158,7 @@ if st.session_state.is_scanning:
     current_processed_show = min(current, total_rows)
     progress_show = current_processed_show / total_rows if total_rows > 0 else 1.0
     progress_bar.progress(progress_show)
-    status_text.text(f"⏳ Đang quét cuốn chiếu và tự động sửa link: Xong {current_processed_show}/{total_rows} dòng (đã check {st.session_state.total_links_scanned} link)...")
+    status_text.text(f"⏳ Đang quét cuốn chiếu: Xong {current_processed_show}/{total_rows} dòng... (Tự động lưu nháp)")
 
     if current < total_rows:
         df_batch = df.iloc[current : current + batch_size]
@@ -127,17 +169,13 @@ if st.session_state.is_scanning:
             for col_idx, col_name in enumerate(df_batch.columns):
                 val = str(row.get(col_name, ''))
                 if 'http' in val or 'cdn' in val:
-                    # Tách chuỗi bằng dấu phẩy
                     parts = val.split(',')
                     col_letter = get_excel_col_name(col_idx)
                     
                     for part in parts:
                         part = part.strip()
-                        # 1. AUTO-FIX: Bù dấu / bị thiếu (https:/cdnv2 -> https://cdnv2)
                         if part.startswith('https:/') and not part.startswith('https://'):
                             part = part.replace('https:/', 'https://', 1)
-                            
-                        # 2. AUTO-FIX: Chuyển khoảng trắng thành %20 để hệ thống đọc được file
                         if ' ' in part:
                             part = part.replace(' ', '%20')
                             
@@ -165,6 +203,10 @@ if st.session_state.is_scanning:
             st.session_state.total_links_scanned += len(tasks_list)
         
         st.session_state.current_row += batch_size
+        
+        # BẢO HIỂM DỮ LIỆU: Lưu ngay kết quả xuống ổ cứng
+        save_progress(st.session_state.current_row, st.session_state.error_results)
+        
         gc.collect()
         st.rerun() 
         
@@ -172,11 +214,11 @@ if st.session_state.is_scanning:
         st.session_state.is_scanning = False 
         st.rerun()
 
-if not st.session_state.is_scanning and st.session_state.current_row >= len(st.session_state.df) if st.session_state.df is not None else False:
+if not st.session_state.is_scanning and st.session_state.df is not None and st.session_state.current_row >= len(st.session_state.df):
     df = st.session_state.df
     error_list = st.session_state.error_results
     
-    st.success(f"🎉 HOÀN THÀNH! Đã quét thành công {st.session_state.total_links_scanned} link.")
+    st.success(f"🎉 HOÀN THÀNH TOÀN BỘ!")
     
     if len(error_list) > 0:
         error_indices = sorted(list(set([e['idx'] for e in error_list])))
@@ -218,8 +260,11 @@ if not st.session_state.is_scanning and st.session_state.current_row >= len(st.s
     else:
         st.success("🎉 Tuyệt vời! Toàn bộ link trong file của bạn đều hoạt động bình thường!")
         
-    if st.button("🔄 Quét file khác", type="primary"):
-        st.session_state.df = None
-        st.session_state.error_results = []
-        st.session_state.current_row = 0
-        st.rerun()
+    col3, col4 = st.columns(2)
+    with col3:
+        if st.button("🔄 Quét file mới (Xóa nháp)", type="primary"):
+            clear_progress()
+            st.session_state.df = None
+            st.session_state.error_results = []
+            st.session_state.current_row = 0
+            st.rerun()
